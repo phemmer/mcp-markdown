@@ -6,7 +6,7 @@ from typing import Annotated, Optional
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
-from mcp_markdown.document import Section, load, save
+from mcp_markdown.document import Section, load, parse, save
 
 mcp = FastMCP("markdown")
 
@@ -101,7 +101,10 @@ async def markdown_update(
     New sections are appended after any existing siblings. Use
     ``markdown_move`` afterwards to place the section in a specific position.
     """
-    root = load(file_path)
+    try:
+        root = load(file_path)
+    except FileNotFoundError:
+        root = Section()
     root.update(section, content)
     save(file_path, root)
 

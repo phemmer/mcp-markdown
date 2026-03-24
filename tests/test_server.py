@@ -67,6 +67,13 @@ async def test_read_missing_section_raises(doc):
         await markdown_read(doc, section=["Nonexistent"])
 
 
+async def test_update_creates_file_if_missing(tmp_path):
+    p = str(tmp_path / "new.md")
+    await markdown_update(p, section=["Hello"], content="World.")
+    result = await markdown_read(p, section=["Hello"], recursive=False)
+    assert result == "World."
+
+
 async def test_update_creates_section(doc):
     await markdown_update(doc, section=["Gamma"], content="Gamma body.")
     result = await markdown_read(doc, section=["Gamma"], recursive=False)
