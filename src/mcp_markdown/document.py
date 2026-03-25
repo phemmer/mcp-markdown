@@ -6,6 +6,8 @@ The tree can be queried, mutated, and rendered back to markdown.
 """
 from __future__ import annotations
 
+import base64
+import hashlib
 import re
 from dataclasses import dataclass, field
 
@@ -97,6 +99,26 @@ class Section:
         """Returns True if this section has no content and no children."""
         return not self.content and not self.children
 
+    def checksum(self) -> str:
+        """
+        Returns an 8-character opaque base64url checksum for this section.
+
+        The first 4 characters are derived from the section's direct ``content``
+        only (local checksum).  The last 4 characters are derived from the full
+        rendered subtree including all descendants (recursive checksum).  Both
+        components are the first 3 bytes of SHA-256, base64url-encoded without
+        padding.
+
+        Callers must treat the value as a single opaque token.  The internal
+        two-part structure is used by :func:`validate_checksum` to enforce the
+        appropriate part depending on the operation.
+        """
+        def _b64(data: str) -> str:
+            digest = hashlib.sha256(data.encode()).digest()[:3]
+            return base64.urlsafe_b64encode(digest).decode()
+
+        return _b64(self.content) + _b64(self.render())
+
     def structure(self, depth: int = 0) -> str:
         """
         Returns an indented outline of all headings in this subtree.
@@ -120,7 +142,7 @@ class Section:
         for title, child in self.children.items():
             line_count = len(child.content.splitlines()) if child.content else 0
             word_count = len(child.content.split()) if child.content else 0
-            lines.append(f'{indent}- {title} ({line_count} lines, {word_count} words)')
+            lines.append(f'{indent}- {title} [{child.checksum()}] ({line_count} lines, {word_count} words)')
             if child.children:
                 lines.append(child.structure(depth + 1))
         return '\n'.join(lines)
@@ -224,6 +246,32 @@ class Section:
             if key == after:
                 new_children[name] = section
         self.children = new_children
+
+
+def validate_checksum(section: Section, provided: str, *, recursive: bool) -> None:
+    """
+    Validates that ``provided`` matches the appropriate part of ``section``'s
+    current checksum.
+
+    When ``recursive`` is ``True``, the recursive component (characters 4–7) is
+    compared — used for recursive deletes where the entire subtree must be
+    unchanged.  Otherwise the local component (characters 0–3) is compared —
+    used for content updates and non-recursive deletes where only the direct
+    body must be unchanged.
+
+    Raises ``ValueError`` on mismatch.
+    """
+    actual = section.checksum()
+    if recursive:
+        if provided[4:] != actual[4:]:
+            raise ValueError(
+                f'Recursive checksum mismatch: document has changed since last read'
+            )
+    else:
+        if provided[:4] != actual[:4]:
+            raise ValueError(
+                f'Local checksum mismatch: section content has changed since last read'
+            )
 
 
 def parse(text: str) -> Section:

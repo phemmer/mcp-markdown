@@ -1,12 +1,12 @@
 """
 MCP server exposing markdown document viewing and editing tools.
 """
-from typing import Annotated, Optional
+from typing import Annotated, Any, Optional
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
-from mcp_markdown.document import Section, load, parse, save
+from mcp_markdown.document import Section, load, parse, save, validate_checksum
 
 mcp = FastMCP("markdown")
 
@@ -21,6 +21,20 @@ _SECTION_FIELD = Field(
 _FILE_FIELD = Field(description="Absolute or relative path to the markdown file.")
 
 
+def _section_checksums(section: Section) -> dict[str, Any]:
+    """
+    Builds a nested dict of ``{title: {checksum, sections?}}`` for all
+    descendants of ``section``.  Used by ``markdown_read`` when recursive.
+    """
+    result: dict[str, Any] = {}
+    for title, child in section.children.items():
+        entry: dict[str, Any] = {'checksum': child.checksum()}
+        if child.children:
+            entry['sections'] = _section_checksums(child)
+        result[title] = entry
+    return result
+
+
 @mcp.tool()
 async def markdown_structure(
     file_path: Annotated[str, _FILE_FIELD],
@@ -28,9 +42,9 @@ async def markdown_structure(
     """
     Returns the heading hierarchy of a markdown document as an indented outline.
 
-    Each entry shows the section's direct content size as ``(N lines, N words)``
-    so you can quickly decide which sections to read in detail.  A ``(preamble)``
-    line is shown when the document has content before the first heading.
+    Each entry shows the section's checksum, direct content size ``(N lines,
+    N words)``.  A ``(preamble)`` line is shown when the document has content
+    before the first heading.
 
     Use this tool first to map the document before reading or editing sections.
     """
@@ -60,12 +74,17 @@ async def markdown_read(
             )
         ),
     ] = True,
-) -> str:
+) -> dict[str, Any]:
     """
-    Returns the content of a section in a markdown document.
+    Returns the content and checksum of a section in a markdown document.
 
-    When no section path is provided, reads the entire document (equivalent to
-    ``recursive=True`` on the root).
+    Response always includes ``content`` (the section text) and ``checksum``
+    (an opaque token for the section's current state).  When ``recursive=true``
+    the response also includes a ``sections`` dict that maps each child section
+    title to its own ``{checksum, sections?}`` entry, so you can obtain
+    checksums for subsections without additional reads.
+
+    When no section path is provided, reads the entire document.
     """
     root = load(file_path)
     path = section or []
@@ -73,11 +92,15 @@ async def markdown_read(
     if target is None:
         raise ValueError(f'Section not found: {path!r}')
     if recursive:
-        # Use the stored heading level as the render depth so that skipped
-        # levels and relative sub-heading gaps are preserved in the output.
         depth = target._level if target._level is not None else len(path)
-        return target.render(depth=depth)
-    return target.content
+        result: dict[str, Any] = {
+            'content': target.render(depth=depth),
+            'checksum': target.checksum(),
+        }
+        if target.children:
+            result['sections'] = _section_checksums(target)
+        return result
+    return {'content': target.content, 'checksum': target.checksum()}
 
 
 @mcp.tool()
@@ -88,15 +111,30 @@ async def markdown_update(
         Optional[str],
         Field(
             description=(
-                "The body text to set for this section. Omit or pass null to delete "
-                "the section and all its children. When provided, only the section's "
-                "direct body is changed; existing nested subsections are preserved."
+                "Body text to set for this section. "
+                "Pass an empty string to clear the body while keeping child sections. "
+                "Omit or pass null to delete the section and all its children."
             )
         ),
     ] = None,
-) -> None:
+    checksum: Annotated[
+        Optional[str],
+        Field(
+            description=(
+                "Checksum of the section as returned by a previous read or structure "
+                "call. Required when the section already exists. "
+                "For content updates and non-recursive deletes (empty string content) "
+                "the local component is validated. "
+                "For recursive deletes (null content) the recursive component is validated."
+            )
+        ),
+    ] = None,
+) -> Optional[str]:
     """
     Creates, updates, or deletes a section in a markdown document.
+
+    Returns the new checksum when the section still exists after the operation
+    (i.e. for creates and content updates), or ``null`` for recursive deletes.
 
     New sections are appended after any existing siblings. Use
     ``markdown_move`` afterwards to place the section in a specific position.
@@ -105,8 +143,23 @@ async def markdown_update(
         root = load(file_path)
     except FileNotFoundError:
         root = Section()
+
+    existing = root.get(section)
+    if existing is not None:
+        if checksum is None:
+            raise ValueError(
+                'checksum is required when updating or deleting an existing section'
+            )
+        validate_checksum(existing, checksum, recursive=(content is None))
+
     root.update(section, content)
     save(file_path, root)
+
+    if content is None:
+        return None
+    updated = root.get(section)
+    assert updated is not None
+    return updated.checksum()
 
 
 @mcp.tool()

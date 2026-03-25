@@ -1,7 +1,7 @@
 """Tests for the document module."""
 import pytest
 
-from mcp_markdown.document import Section, parse, load, save
+from mcp_markdown.document import Section, parse, load, save, validate_checksum
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +399,96 @@ def test_render_includes_content():
     rendered = root.render()
     assert "H1 body." in rendered
     assert "H2 body." in rendered
+
+
+# ---------------------------------------------------------------------------
+# Section.checksum() / validate_checksum()
+# ---------------------------------------------------------------------------
+
+
+def test_checksum_is_eight_chars():
+    root = parse(SIMPLE_DOC)
+    cs = root.children["H1"].checksum()
+    assert len(cs) == 8
+
+
+def test_checksum_changes_when_content_changes():
+    root = parse(SIMPLE_DOC)
+    cs_before = root.children["H1"].checksum()
+    root.update(["H1"], "Different body.")
+    cs_after = root.children["H1"].checksum()
+    assert cs_before != cs_after
+
+
+def test_checksum_local_part_changes_when_content_changes():
+    root = parse(SIMPLE_DOC)
+    cs_before = root.children["H1"].checksum()
+    root.update(["H1"], "Different body.")
+    cs_after = root.children["H1"].checksum()
+    # Local (chars 0-3) must differ
+    assert cs_before[:4] != cs_after[:4]
+
+
+def test_checksum_recursive_part_changes_when_child_changes():
+    root = parse(SIMPLE_DOC)
+    cs_before = root.children["H1"].checksum()
+    root.update(["H1", "H1.1"], "Different child body.")
+    cs_after = root.children["H1"].checksum()
+    # Recursive (chars 4-7) must differ; local (chars 0-3) is unchanged
+    assert cs_before[4:] != cs_after[4:]
+    assert cs_before[:4] == cs_after[:4]
+
+
+def test_checksum_stable_across_reads():
+    root = parse(SIMPLE_DOC)
+    cs1 = root.children["H1"].checksum()
+    cs2 = root.children["H1"].checksum()
+    assert cs1 == cs2
+
+
+def test_validate_checksum_local_passes():
+    root = parse(SIMPLE_DOC)
+    section = root.children["H1"]
+    validate_checksum(section, section.checksum(), recursive=False)  # must not raise
+
+
+def test_validate_checksum_recursive_passes():
+    root = parse(SIMPLE_DOC)
+    section = root.children["H1"]
+    validate_checksum(section, section.checksum(), recursive=True)  # must not raise
+
+
+def test_validate_checksum_local_fails_on_wrong_local():
+    root = parse(SIMPLE_DOC)
+    section = root.children["H1"]
+    bad = "ZZZZ" + section.checksum()[4:]
+    with pytest.raises(ValueError):
+        validate_checksum(section, bad, recursive=False)
+
+
+def test_validate_checksum_recursive_fails_on_wrong_recursive():
+    root = parse(SIMPLE_DOC)
+    section = root.children["H1"]
+    bad = section.checksum()[:4] + "ZZZZ"
+    with pytest.raises(ValueError):
+        validate_checksum(section, bad, recursive=True)
+
+
+def test_validate_checksum_recursive_ignores_local_mismatch():
+    """Recursive validation only checks chars 4-7, not 0-3."""
+    root = parse(SIMPLE_DOC)
+    section = root.children["H1"]
+    # Correct recursive part, wrong local part — recursive validation must pass
+    mixed = "ZZZZ" + section.checksum()[4:]
+    validate_checksum(section, mixed, recursive=True)  # must not raise
+
+
+def test_validate_checksum_local_ignores_recursive_mismatch():
+    """Local validation only checks chars 0-3, not 4-7."""
+    root = parse(SIMPLE_DOC)
+    section = root.children["H1"]
+    mixed = section.checksum()[:4] + "ZZZZ"
+    validate_checksum(section, mixed, recursive=False)  # must not raise
 
 
 # ---------------------------------------------------------------------------
